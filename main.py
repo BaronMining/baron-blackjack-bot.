@@ -1,54 +1,50 @@
 import telebot
 from telebot import types
+import os
 from flask import Flask
 from threading import Thread
-import os
 
-# --- 1. DIRECT TOKEN CONNECTION ---
-# Your token is now locked inside the machine
-API_TOKEN = '8668197678:AcbXX3KgvqD7B8Y4WjCu6yNx1Prfu5cNHz'
-bot = telebot.TeleBot(API_TOKEN, threaded=False)
+# --- 1. THE BRAIN (Your Token) ---
+TOKEN = '8668197678:AcbXX3KgvqD7B8Y4WjCu6yNx1Prfu5cNHz'
+bot = telebot.TeleBot(TOKEN, threaded=False)
 
-# --- 2. THE WEB SERVER (Keep-Alive) ---
-app = Flask('')
+# --- 2. THE SIMPLIFIED WEB SERVER ---
+# This part is ONLY to keep Render happy. 
+# It runs on a separate thread so it doesn't touch the bot.
+server = Flask('')
 
-@app.route('/')
-def home():
-    return "Baron AI Engine: Status ACTIVE"
+@server.route('/')
+def health_check():
+    return "Baron AI is Online"
 
-def run():
-    # Use port 10000 (Render default) or whatever port Render assigns
+def run_server():
+    # Render looks for port 10000 by default
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    server.run(host='0.0.0.0', port=port)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+# --- 3. BLACKJACK MATHEMATICAL ENGINE ---
+user_states = {}
 
-# --- 3. THE MATHEMATICAL ENGINE (4-Deck American Rules) ---
-user_data = {}
+def get_decision(player_cards, dealer_card):
+    total = sum(player_cards)
+    has_ace = 11 in player_cards
+    is_pair = len(player_cards) == 2 and player_cards[0] == player_cards[1]
 
-def get_best_move(player_hand, dealer_card):
-    total = sum(player_hand)
-    has_ace = 11 in player_hand
-    is_pair = len(player_hand) == 2 and player_hand[0] == player_hand[1]
-
-    # --- SPLIT LOGIC ---
+    # Split Logic
     if is_pair:
-        val = player_hand[0]
+        val = player_cards[0]
         if val in [8, 11]: return "🔥 SPLIT"
         if val in [2, 3, 7] and dealer_card <= 7: return "🔥 SPLIT"
         if val == 6 and dealer_card <= 6: return "🔥 SPLIT"
-        if val == 4 and dealer_card in [5, 6]: return "🔥 SPLIT"
         if val == 9 and dealer_card not in [7, 10, 11]: return "🔥 SPLIT"
 
-    # --- SOFT TOTALS ---
+    # Soft Totals (Aces)
     if has_ace:
         if total >= 19: return "✋ STAND"
         if total == 18: return "✋ STAND" if dealer_card <= 8 else "🃏 HIT"
         return "🃏 HIT"
 
-    # --- HARD TOTALS ---
+    # Hard Totals
     if total >= 17: return "✋ STAND"
     if total <= 8: return "🃏 HIT"
     if total == 11: return "💰 DOUBLE"
@@ -58,38 +54,47 @@ def get_best_move(player_hand, dealer_card):
             
     return "🃏 HIT"
 
-# --- 4. TELEGRAM INTERFACE ---
+# --- 4. TELEGRAM COMMANDS ---
 @bot.message_handler(commands=['start', 'blackjack'])
-def start(message):
-    user_data[message.chat.id] = {'player': [], 'dealer': None}
+def welcome(message):
+    user_states[message.chat.id] = {'hand': [], 'dealer': None}
     markup = types.ReplyKeyboardMarkup(row_width=4, resize_keyboard=True)
-    btns = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-    markup.add(*[types.KeyboardButton(b) for b in btns])
-    bot.send_message(message.chat.id, "🦅 **BARON AI: ONLINE**\nSelect your 1st card:", reply_markup=markup, parse_mode="Markdown")
+    cards = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+    markup.add(*[types.KeyboardButton(c) for c in cards])
+    bot.send_message(message.chat.id, "🦅 **BARON AI ENGINE ACTIVE**\nSelect your FIRST card:", reply_markup=markup, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
-def handle_input(message):
-    chat_id = message.chat.id
-    val = 11 if message.text == 'A' else (10 if message.text in ['J', 'Q', 'K'] else int(message.text))
+def handle_cards(message):
+    cid = message.chat.id
+    if cid not in user_states:
+        user_states[cid] = {'hand': [], 'dealer': None}
     
-    if chat_id not in user_data or (len(user_data[chat_id]['player']) >= 2 and user_data[chat_id]['dealer'] is not None):
-        user_data[chat_id] = {'player': [], 'dealer': None}
+    # Card value conversion
+    val = 11 if message.text == 'A' else (10 if message.text in ['J', 'Q', 'K'] else int(message.text))
+    state = user_states[cid]
 
-    data = user_data[chat_id]
-    if len(data['player']) < 2:
-        data['player'].append(val)
-        msg = "Select 2nd card:" if len(data['player']) == 1 else "Select DEALER card:"
-        bot.send_message(chat_id, msg)
-    elif data['dealer'] is None:
-        data['dealer'] = val
-        move = get_best_move(data['player'], data['dealer'])
-        res = f"📊 **DECISION**\n━━━━━━━━━━━━━\n👉 **{move}**"
-        bot.send_message(chat_id, res, parse_mode="Markdown")
-        user_data[chat_id] = {'player': [], 'dealer': None}
-        bot.send_message(chat_id, "Next round! Select 1st card:")
+    if len(state['hand']) < 2:
+        state['hand'].append(val)
+        if len(state['hand']) == 1:
+            bot.send_message(cid, "Select your SECOND card:")
+        else:
+            bot.send_message(cid, "Select DEALER'S up-card:")
+    elif state['dealer'] is None:
+        state['dealer'] = val
+        move = get_decision(state['hand'], state['dealer'])
+        
+        # Format Result
+        output = f"📊 **STRATEGY**\nTotal: {sum(state['hand'])}\nDealer: {message.text}\n\n👉 **{move}**"
+        bot.send_message(cid, output, parse_mode="Markdown")
+        
+        # Instant Reset for Next Round
+        user_states[cid] = {'hand': [], 'dealer': None}
+        bot.send_message(cid, "--- NEW ROUND ---\nSelect 1st card:")
 
-# --- 5. EXECUTION ---
+# --- 5. START UP ---
 if __name__ == "__main__":
-    keep_alive()
-    print("Baron Bot is now hunting...")
-    bot.infinity_polling()
+    # Start server in background
+    Thread(target=run_server).start()
+    print("Baron Bot is starting...")
+    # Start bot in foreground
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
