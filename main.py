@@ -1,110 +1,119 @@
-import os
-import telebot
+import os, telebot, pytz, hmac, hashlib
+from datetime import datetime, timedelta
 from telebot import types
 from flask import Flask
 from threading import Thread
 
-# --- 1. CONNECTION ---
+# --- 1. CONFIGURATION ---
 TOKEN = '8320085836:AAGUv9vJOLGGGt4X-vOX7bLIgGZoBziyzSY'
 bot = telebot.TeleBot(TOKEN, threaded=False)
+UG_TZ = pytz.timezone('Africa/Kampala')
+session_history = {} 
 
-# --- 2. WEB SERVER FOR RENDER ---
-app = Flask('')
-@app.route('/')
-def home(): return "Baron Multi-Hit Engine: ACTIVE"
+# --- 2. ANALYTICS & TIMING ---
+def get_safe_status():
+    """Determines if the current Kampala time is good for betting."""
+    now = datetime.now(UG_TZ)
+    hour = now.hour
+    # Statistically best: Late night (1AM-5AM) or Mid-Morning (9AM-11AM)
+    if (1 <= hour <= 5) or (9 <= hour <= 11):
+        return "🟢 EXCELLENT (Low Traffic)", True
+    elif (18 <= hour <= 21):
+        return "🔴 DANGEROUS (Peak Traffic)", False
+    else:
+        return "🟡 STABLE (Caution)", True
 
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# --- 3. ADVANCED MULTI-HIT LOGIC ---
-user_states = {}
-
-def get_decision(player_cards, dealer_card):
-    total = sum(player_cards)
-    has_ace = 11 in player_cards
-    is_pair = len(player_cards) == 2 and player_cards[0] == player_cards[1]
-
-    if total > 21: return "💥 BUST (You Lose)"
-    if total == 21: return "✋ STAND (21!)"
-
-    # Split Logic (Only on first 2 cards)
-    if is_pair:
-        val = player_cards[0]
-        if val in [8, 11]: return "🔥 SPLIT"
-        if val in [2, 3, 7] and dealer_card <= 7: return "🔥 SPLIT"
-        if val == 6 and dealer_card <= 6: return "🔥 SPLIT"
-        if val == 9 and dealer_card not in [7, 10, 11]: return "🔥 SPLIT"
-
-    # Soft Totals
-    if has_ace:
-        if total >= 19: return "✋ STAND"
-        if total == 18: return "✋ STAND" if dealer_card <= 8 else "🃏 HIT"
-        return "🃏 HIT"
-
-    # Hard Totals
-    if total >= 17: return "✋ STAND"
-    if total <= 8: return "🃏 HIT"
-    if total == 11: return "💰 DOUBLE"
-    if total == 10 and dealer_card <= 9: return "💰 DOUBLE"
-    if 12 <= total <= 16:
-        return "✋ STAND" if dealer_card <= 6 else "🃏 HIT"
+def get_mines_prediction(server_seed, client_seed, nonce, mines=3):
+    """HMAC-SHA256 Grid Generation Logic"""
+    available_tiles = list(range(25))
+    mine_positions = []
+    cursor = 0
+    while len(mine_positions) < mines:
+        message = f"{client_seed}:{nonce}:{cursor // 8}".encode()
+        hash_digest = hmac.new(server_seed.encode(), message, hashlib.sha256).digest()
+        chunk = hash_digest[(cursor % 8) * 4 : (cursor % 8) * 4 + 4]
+        rand_float = int.from_bytes(chunk, 'big') / (2**32)
+        idx = int(rand_float * len(available_tiles))
+        mine_positions.append(available_tiles.pop(idx))
+        cursor += 1
     
-    return "🃏 HIT"
+    grid = ["⭐"] * 25
+    for m in mine_positions: grid[m] = "·"
+    return grid
 
-# --- 4. TELEGRAM INTERFACE ---
-@bot.message_handler(commands=['start'])
-def welcome(message):
-    user_states[message.chat.id] = {'hand': [], 'dealer': None, 'status': 'PLAYER_CARDS'}
-    markup = types.ReplyKeyboardMarkup(row_width=4, resize_keyboard=True)
-    cards = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-    markup.add(*[types.KeyboardButton(c) for c in cards])
-    bot.send_message(message.chat.id, "🦅 **BARON MULTI-HIT ENGINE**\nSelect your 1st card:", reply_markup=markup, parse_mode="Markdown")
-
-@bot.message_handler(func=lambda message: True)
-def handle_game(message):
+# --- 3. BOT COMMANDS ---
+@bot.message_handler(commands=['start', 'mines'])
+def init_session(message):
     cid = message.chat.id
-    if cid not in user_states: welcome(message); return
-    
-    text = message.text
-    if text not in ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']: return
-    val = 11 if text == 'A' else (10 if text in ['J', 'Q', 'K'] else int(text))
-    
-    state = user_states[cid]
+    session_history[cid] = {'step': 'ID', 'rounds': 0}
+    status_text, _ = get_safe_status()
+    bot.send_message(cid, f"🦅 **BARON OMNI-ENGINE v5.0**\n📍 Zone: **Kampala, Uganda**\n🚦 Server: {status_text}\n\nTo begin, enter your **1xBet ID**:")
 
-    # Step 1: Get Player's first two cards
-    if state['status'] == 'PLAYER_CARDS':
-        state['hand'].append(val)
-        if len(state['hand']) == 1:
-            bot.send_message(cid, "Select your 2nd card:")
-        else:
-            state['status'] = 'DEALER_CARD'
-            bot.send_message(cid, "Select DEALER'S up-card:")
+@bot.message_handler(func=lambda m: True)
+def process_logic(message):
+    cid = message.chat.id
+    if cid not in session_history: return
+    state = session_history[cid]
 
-    # Step 2: Get Dealer card and give first decision
-    elif state['status'] == 'DEALER_CARD':
-        state['dealer'] = val
-        move = get_decision(state['hand'], state['dealer'])
+    if state['step'] == 'ID':
+        state['id'], state['step'] = message.text, 'S_SEED'
+        bot.send_message(cid, "✅ ID SAVED. Enter **Server Seed** (Hashed):")
+    elif state['step'] == 'S_SEED':
+        state['s_seed'], state['step'] = message.text, 'C_SEED'
+        bot.send_message(cid, "📡 SYNCED. Enter **Client Seed** (e.g. 'Baron'):")
+    elif state['step'] == 'C_SEED':
+        state['c_seed'], state['step'] = message.text, 'PLAY'
+        bot.send_message(cid, "🚀 **READY.** Enter current **Nonce** (Round #):")
+    elif state['step'] == 'PLAY' or message.text.isdigit():
+        nonce = message.text if message.text.isdigit() else "0"
+        state['rounds'] += 1
         
-        if "HIT" in move:
-            state['status'] = 'WAITING_FOR_HIT'
-            bot.send_message(cid, f"📊 **DECISION: {move}**\n\nWhat was the next card you received?")
-        else:
-            bot.send_message(cid, f"📊 **DECISION: {move}**\n\n--- ROUND OVER ---\nSelect 1st card for next round:")
-            user_states[cid] = {'hand': [], 'dealer': None, 'status': 'PLAYER_CARDS'}
-
-    # Step 3: Handle Hit results (3rd, 4th, 5th cards)
-    elif state['status'] == 'WAITING_FOR_HIT':
-        state['hand'].append(val)
-        move = get_decision(state['hand'], state['dealer'])
+        # Timing Calculations
+        now = datetime.now(UG_TZ)
+        expiry = now + timedelta(minutes=1, seconds=30)
+        status_text, is_safe = get_safe_status()
         
-        if "HIT" in move:
-            bot.send_message(cid, f"📊 **NEW TOTAL: {sum(state['hand'])}\nDECISION: {move}**\n\nSelect your NEXT card:")
+        grid = get_mines_prediction(state['s_seed'], state['c_seed'], nonce)
+        
+        # Visual Grid Construction
+        display = f"🎯 **PREDICTION: ID {state['id']}**\n"
+        display += f"⏰ Time (EAT): `{now.strftime('%H:%M:%S')}`\n"
+        display += f"⌛ **EXPIRES:** `{expiry.strftime('%H:%M:%S')}`\n"
+        display += f"🚦 Server: {status_text}\n\n"
+        display += "┏━━━┳━━━┳━━━┳━━━┳━━━┓\n"
+        for i in range(0, 25, 5):
+            display += "┃ " + " ┃ ".join(grid[i:i+5]) + " ┃\n"
+            if i < 20: display += "┣━━━╋━━━╋━━━╋━━━╋━━━┫\n"
+        display += "┗━━━┻━━━┻━━━┻━━━┻━━━┛\n\n"
+        
+        # Rotator Alert
+        if state['rounds'] >= 5:
+            display += "⚠️ **SECURITY ALERT:** You've played 5 rounds. Use 'RESET' to change your Client Seed now!\n"
+        
+        if not is_safe:
+            display += "❌ **WAIT:** High server traffic. Risk of pattern drift is high."
         else:
-            bot.send_message(cid, f"📊 **FINAL TOTAL: {sum(state['hand'])}\nDECISION: {move}**\n\n--- ROUND OVER ---\nSelect 1st card:")
-            user_states[cid] = {'hand': [], 'dealer': None, 'status': 'PLAYER_CARDS'}
+            display += "🟢 **PLAY NOW:** Pattern is synchronized."
 
-# --- 5. START ---
-if __name__ == "__main__":
-    Thread(target=run_server).start()
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        bot.send_message(cid, f"`{display}`", parse_mode="Markdown", reply_markup=nav_keys())
+
+def nav_keys():
+    m = types.InlineKeyboardMarkup()
+    m.add(types.InlineKeyboardButton("🔄 NEXT NONCE", callback_data="next"))
+    m.add(types.InlineKeyboardButton("🧹 RESET SESSION", callback_data="reset"))
+    return m
+
+@bot.callback_query_handler(func=lambda call: True)
+def callbacks(call):
+    if call.data == "reset":
+        session_history.pop(call.message.chat.id, None)
+        init_session(call.message)
+    else:
+        bot.send_message(call.message.chat.id, "Enter the **Next Nonce**:")
+
+# --- 4. DEPLOY ---
+app = Flask(''); 
+@app.route('/')
+def h(): return "Baron 5.0 Timed Active"
+Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
+bot.infinity_polling()
